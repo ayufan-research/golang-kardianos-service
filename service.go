@@ -93,6 +93,7 @@ type Config struct {
 	//  * OS X
 	//    - KeepAlive bool (true)
 	//    - RunAtLoad bool (false)
+	//    - SessionCreate bool (true)
 	Option KeyValue
 }
 
