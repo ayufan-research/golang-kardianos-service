@@ -146,8 +146,7 @@ func (s *upstart) Restart() error {
 // The upstart script should stop with an INT or the Go runtime will terminate
 // the program before the Stop handler can run.
 const upstartScript = `# {{.Description}}
-
- {{if .DisplayName}}description    "{{.DisplayName}}"{{end}}
+{{if .DisplayName}}description    "{{.DisplayName}}"{{end}}
 
 kill signal INT
 start on filesystem or runlevel [2345]
@@ -159,12 +158,15 @@ respawn
 respawn limit 10 5
 umask 022
 
-console none
+console log
 
 pre-start script
     test -x {{.Path}} || { stop; exit 0; }
 end script
 
 # Start
-exec {{.Path}}{{range .Arguments}} {{.|cmd}}{{end}}
+# Due to bug in Precise Upstart this is the only way to inherit user groups
+# http://upstart.ubuntu.com/cookbook/#changing-user
+exec start-stop-daemon --start {{if .UserName}}-c {{.UserName|cmd}}{{end}} {{if .WorkingDirectory}}-d {{.WorkingDirectory|cmd}}{{end}} --exec {{.Path}} -- {{range .Arguments}} {{.|cmd}}{{end}}
 `
+

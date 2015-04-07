@@ -157,6 +157,7 @@ func (s *systemd) Restart() error {
 
 const systemdScript = `[Unit]
 Description={{.Description}}
+After=syslog.target network.target
 ConditionFileIsExecutable={{.Path|cmd}}
 
 [Service]
@@ -168,6 +169,11 @@ ExecStart={{.Path|cmd}}{{range .Arguments}} {{.|cmd}}{{end}}
 {{if .UserName}}User={{.UserName}}{{end}}
 Restart=always
 RestartSec=120
+
+# use syslog for logging
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier={{.Name}}
 
 [Install]
 WantedBy=multi-user.target

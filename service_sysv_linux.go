@@ -28,6 +28,16 @@ func newSystemVService(i Interface, c *Config) (Service, error) {
 	return s, nil
 }
 
+func isDebianSysv() bool {
+	if _, err := os.Stat("/lib/lsb/init-functions"); err != nil {
+		return false
+	}
+	if _, err := os.Stat("/sbin/start-stop-daemon"); err != nil {
+		return false
+	}
+	return true
+}
+
 func (s *sysv) String() string {
 	if len(s.DisplayName) > 0 {
 		return s.DisplayName
@@ -46,7 +56,11 @@ func (s *sysv) configPath() (cp string, err error) {
 	return
 }
 func (s *sysv) template() *template.Template {
-	return template.Must(template.New("").Funcs(tf).Parse(sysvScript))
+	script := sysvScript
+	if isDebianSysv() {
+		script = sysvDebianScript
+	}
+	return template.Must(template.New("").Funcs(tf).Parse(script))
 }
 
 func (s *sysv) Install() error {
@@ -161,8 +175,8 @@ const sysvScript = `#!/bin/sh
 
 ### BEGIN INIT INFO
 # Provides:          {{.Path}}
-# Required-Start:
-# Required-Stop:
+# Required-Start:    $local_fs $remote_fs $network $syslog
+# Required-Stop:     $local_fs $remote_fs $network $syslog
 # Default-Start:     2 3 4 5
 # Default-Stop:      0 1 6
 # Short-Description: {{.DisplayName}}
@@ -171,10 +185,9 @@ const sysvScript = `#!/bin/sh
 
 cmd="{{.Path}}{{range .Arguments}} {{.|cmd}}{{end}}"
 
-name=$(basename $0)
+name="{{.Name}}"
 pid_file="/var/run/$name.pid"
-stdout_log="/var/log/$name.log"
-stderr_log="/var/log/$name.err"
+log_file="/var/log/$name.log"
 
 get_pid() {
     cat "$pid_file"
@@ -190,7 +203,8 @@ case "$1" in
             echo "Already started"
         else
             echo "Starting $name"
-            $cmd >> "$stdout_log" 2>> "$stderr_log" &
+		    {{if .WorkingDirectory}}cd {{.WorkingDirectory|cmd}}{{end}} \
+            $cmd &>> $log_file &
             echo $! > "$pid_file"
             if ! is_running; then
                 echo "Unable to start, see $stdout_log and $stderr_log"
@@ -245,5 +259,81 @@ case "$1" in
     exit 1
     ;;
 esac
+exit 0
+`
+
+const sysvDebianScript = `#! /bin/bash
+
+### BEGIN INIT INFO
+# Provides:          {{.Path}}
+# Required-Start:    $local_fs $remote_fs $network $syslog
+# Required-Stop:     $local_fs $remote_fs $network $syslog
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: {{.DisplayName}}
+# Description:       {{.Description}}
+### END INIT INFO
+
+DESC="{{.Description}}"
+USER="{{.UserName}}"
+NAME="{{.Name}}"
+PIDFILE="/var/run/$NAME.pid"
+LOGFILE="/var/log/$NAME.log"
+
+# Read configuration variable file if it is present
+[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+
+# Define LSB log_* functions.
+. /lib/lsb/init-functions
+
+## Check to see if we are running as root first.
+if [ "$(id -u)" != "0" ]; then
+    echo "This script must be run as root"
+    exit 1
+fi
+
+do_start() {
+  start-stop-daemon --start \
+    {{if .ChRoot}}--chroot {{.ChRoot|cmd}}{{end}} \
+    {{if .WorkingDirectory}}--chdir {{.WorkingDirectory|cmd}}{{end}} \
+    {{if .UserName}} --chuid {{.UserName|cmd}}{{end}} \
+    --pidfile "$PIDFILE" \
+    --no-close \
+    --background \
+    --make-pidfile \
+    --exec {{.Path}} -- {{range .Arguments}} {{.|cmd}}{{end}} &>> $LOGFILE
+}
+
+do_stop() {
+  start-stop-daemon --stop \
+    {{if .UserName}} --chuid {{.UserName|cmd}}{{end}} \
+  	--pidfile "$PIDFILE" \
+  	--quiet
+}
+
+case "$1" in
+  start)
+    log_daemon_msg "Starting $DESC"
+    do_start
+    log_end_msg $?
+    ;;
+  stop)
+    log_daemon_msg "Stopping $DESC"
+    do_stop
+    log_end_msg $?
+    ;;
+  restart)
+    $0 stop
+    $0 start
+    ;;
+  status)
+    status_of_proc -p "$PIDFILE" "$DAEMON" "$DESC"
+    ;;
+  *)
+    echo "Usage: sudo service gitlab-ci-multi-runner {start|stop|restart|status}" >&2
+    exit 1
+    ;;
+esac
+
 exit 0
 `
