@@ -168,5 +168,8 @@ pre-start script
 end script
 
 # Start
-exec {{.Path}}{{range .Arguments}} {{.|cmd}}{{end}}
+# Due to bug in Precise Upstart this is the only way to inherit user groups
+# http://upstart.ubuntu.com/cookbook/#changing-user
+exec start-stop-daemon --start {{if .UserName}}-c {{.UserName|cmd}}{{end}} {{if .WorkingDirectory}}-d {{.WorkingDirectory|cmd}}{{end}} --exec {{.Path}} -- {{range .Arguments}} {{.|cmd}}{{end}}
 `
+
