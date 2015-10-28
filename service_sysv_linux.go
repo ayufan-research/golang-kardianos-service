@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"os/exec"
 	"syscall"
 	"text/template"
 	"time"
@@ -26,23 +27,6 @@ func newSystemVService(i Interface, c *Config) (Service, error) {
 	}
 
 	return s, nil
-}
-
-func isDebianSysv() bool {
-	if _, err := os.Stat("/lib/lsb/init-functions"); err != nil {
-		return false
-	}
-	if _, err := os.Stat("/sbin/start-stop-daemon"); err != nil {
-		return false
-	}
-	return true
-}
-
-func isRedhatSysv() bool {
-	if _, err := os.Stat("/etc/rc.d/init.d/functions"); err != nil {
-		return false
-	}
-	return true
 }
 
 func (s *sysv) String() string {
@@ -63,25 +47,53 @@ func (s *sysv) configPath() (cp string, err error) {
 	return
 }
 
-func (s *sysv) template() (*template.Template, error) {
-	script := sysvScript
-	if isDebianSysv() {
-		script = sysvDebianScript
-	} else if isRedhatSysv() {
-		script = sysvRedhatScript
-	} else {
-		return nil, errors.New("Not supported system")
+/* Determine the SysV flavour of this Linux system.
+   Guidelines:
+   1. if RH functions exist, make use of them, else
+   2. if no LSB functions exist (even Debian/Ubuntu require them), exit with a message, else
+   3. if start-stop-daemon is in $PATH, proceed as if it is a Debian-like system, else
+   4. fall back to LSB functions to start/stop the service.
+ */
+func determineDistroFlavour() string {
+	if _, err := os.Stat("/etc/rc.d/init.d/functions"); err == nil {
+		/* Red Hat / CentOS type systems */
+		return "redhat"
+	} else if  _, err := os.Stat("/lib/lsb/init-functions"); os.IsNotExist(err) {
+		fmt.Fprintf(os.Stderr, "System is lacking LSB support (/lib/lsb/init-functions)")
+		os.Exit(1)
+	} else if _, err := exec.LookPath("start-stop-daemon"); err == nil {
+		/* debian/ubuntu based systems support this */
+		return "debian"
 	}
-	return template.Must(template.New("").Funcs(tf).Parse(script)), nil
+	/* Linux Standard Base as lowest common denominator */
+	return "lsb"
 }
+
 
 func (s *sysv) Install() error {
 	confPath, err := s.configPath()
 	if err != nil {
 		return err
 	}
-	_, err = os.Stat(confPath)
-	if err == nil {
+
+	path, err := s.execPath()
+	if err != nil {
+		return err
+	}
+
+	var to = &struct {
+		*Config
+		// Absolute path of the executable
+		Path		string
+		// The SysV flavour of this system
+		Flavour		string
+	}{
+		s.Config,
+		path,
+		determineDistroFlavour(),
+	}
+
+	if _, err = os.Stat(confPath); err == nil {
 		return fmt.Errorf("Init already exists: %s", confPath)
 	}
 
@@ -91,24 +103,7 @@ func (s *sysv) Install() error {
 	}
 	defer f.Close()
 
-	path, err := s.execPath()
-	if err != nil {
-		return err
-	}
-
-	var to = &struct {
-		*Config
-		Path string
-	}{
-		s.Config,
-		path,
-	}
-
-	template, err := s.template()
-	if err != nil {
-		return err
-	}
-	err = template.Execute(f, to)
+	err = template.Must(template.New("").Funcs(tf).Parse(sysvScript)).Execute(f, to)
 	if err != nil {
 		return err
 	}
@@ -183,13 +178,16 @@ func (s *sysv) Restart() error {
 	return s.Start()
 }
 
-const sysvScript = `#!/bin/sh
-# For RedHat and cousins:
-# chkconfig: - 99 01
+const sysvScript = `#!/bin/bash
+{{ if eq .Flavour "redhat"}}#
+# {{.DisplayName}}
+#
+# chkconfig:   2345 50 02
 # description: {{.Description}}
-# processname: {{.Path}}
 
-### BEGIN INIT INFO
+# Source function library.
+. /etc/rc.d/init.d/functions
+{{else}}{{/* System with support for LSB */}}### BEGIN INIT INFO
 # Provides:          {{.Path}}
 # Required-Start:    $local_fs $remote_fs $network $syslog
 # Required-Stop:     $local_fs $remote_fs $network $syslog
@@ -199,253 +197,142 @@ const sysvScript = `#!/bin/sh
 # Description:       {{.Description}}
 ### END INIT INFO
 
-cmd="{{.Path}}{{range .Arguments}} {{.|cmd}}{{end}}"
-
-name="{{.Name}}"
-pid_file="/var/run/$name.pid"
-stdout_log="/var/log/$name.log"
-stderr_log="/var/log/$name.err"
-
-get_pid() {
-    cat "$pid_file"
-}
-
-is_running() {
-    [ -f "$pid_file" ] && ps $(get_pid) > /dev/null 2>&1
-}
-
-case "$1" in
-    start)
-        if is_running; then
-            echo "Already started"
-        else
-            echo "Starting $name"
-            {{if .WorkingDirectory}}cd '{{.WorkingDirectory}}'{{end}}
-            $cmd >> "$stdout_log" 2>> "$stderr_log" &
-            echo $! > "$pid_file"
-            if ! is_running; then
-                echo "Unable to start, see $stdout_log and $stderr_log"
-                exit 1
-            fi
-        fi
-    ;;
-    stop)
-        if is_running; then
-            echo -n "Stopping $name.."
-            kill $(get_pid)
-            for i in {1..10}
-            do
-                if ! is_running; then
-                    break
-                fi
-                echo -n "."
-                sleep 1
-            done
-            echo
-            if is_running; then
-                echo "Not stopped; may still be shutting down or shutdown may have failed"
-                exit 1
-            else
-                echo "Stopped"
-                if [ -f "$pid_file" ]; then
-                    rm "$pid_file"
-                fi
-            fi
-        else
-            echo "Not running"
-        fi
-    ;;
-    restart)
-        $0 stop
-        if is_running; then
-            echo "Unable to stop, will not attempt to start"
-            exit 1
-        fi
-        $0 start
-    ;;
-    status)
-        if is_running; then
-            echo "Running"
-        else
-            echo "Stopped"
-            exit 1
-        fi
-    ;;
-    *)
-    echo "Usage: $0 {start|stop|restart|status}"
-    exit 1
-    ;;
-esac
-exit 0
-`
-
-const sysvDebianScript = `#! /bin/bash
-
-### BEGIN INIT INFO
-# Provides:          {{.Path}}
-# Required-Start:    $local_fs $remote_fs $network $syslog
-# Required-Stop:     $local_fs $remote_fs $network $syslog
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
-# Short-Description: {{.DisplayName}}
-# Description:       {{.Description}}
-### END INIT INFO
-
-DESC="{{.Description}}"
-USER="{{.UserName}}"
+# Source function library.
+. /lib/lsb/init-functions{{end}}
+CMD="{{.Path}}"
 NAME="{{.Name}}"
-PIDFILE="/var/run/$NAME.pid"
+DESC="{{.Description}}"
 
-# Read configuration variable file if it is present
-[ -r /etc/default/$NAME ] && . /etc/default/$NAME
+# The following can be overridden via configuration file
+PIDFILE="/var/run/${NAME}.pid"
+LOCKFILE="/var/lock/subsys/${NAME}"
 
-# Define LSB log_* functions.
-. /lib/lsb/init-functions
+# Log output of $CMD
+STDOUTLOG="/dev/null"
+STDERRLOG="/dev/null"
 
-## Check to see if we are running as root first.
-if [ "$(id -u)" != "0" ]; then
-    echo "This script must be run as root"
-    exit 1
+# Startup options
+DAEMON_ARGS="{{range .Arguments}} {{.|cmd}}{{end}}"
+
+# Source configuration defaults to override above as appropriate.
+! test -e /etc/default/${NAME}   || . /etc/default/${NAME}
+! test -e /etc/sysconfig/${NAME} || . /etc/sysconfig/${NAME}
+test $(id -u) -eq "0"            || exit 4 # LSB exit: insufficient permissions
+test -x ${CMD}                   || exit 5 # LSB exit: program not installed
+test -d $(dirname $LOCKFILE)     || mkdir -p $(dirname $LOCKFILE)
+{{ if eq .Flavour "redhat"}}
+get_status() {
+    status -p "$PIDFILE" "$CMD"
+}
+
+start() {
+    get_status &>/dev/null && return 0
+    echo -n $"Starting ${DESC}: "
+    daemon --pidfile="$PIDFILE" {{if .UserName}}--user={{.UserName}}{{end}} \
+	   "$CMD $DAEMON_ARGS </dev/null >$STDOUTLOG 2>$STDERRLOG & echo \$! > $PIDFILE"
+    sleep 0.5 # wait briefly to see if service failed to start
+    get_status &>/dev/null && success || failure
+    RETVAL=$?
+    [ $RETVAL -eq 0 ] &&  touch "$LOCKFILE" || rm -f "$PIDFILE"
+    echo
+    return $RETVAL
+}
+
+stop() {
+    get_status &>/dev/null || return 0
+    echo -n $"Stopping ${DESC}: "
+    killproc -p "$PIDFILE" "$CMD" -TERM
+    RETVAL=$?
+    [ $RETVAL -eq 0 ] && rm -f "$LOCKFILE" "$PIDFILE" || rm -f "$PIDFILE"
+    echo
+    return $RETVAL
+}{{else}}{{/* Debian-like system or fallback to LSB */}}
+if type status_of_proc &>/dev/null; then	# newer LSB versions only
+    get_status() {
+        status_of_proc $([ -e $PIDFILE ] && echo -p $PIDFILE) "$CMD" "$NAME"
+    }
+else
+    get_status() {
+	pidofproc $([ -e $PIDFILE ] && echo -p $PIDFILE) "$CMD" >/dev/null
+	RETVAL=$?
+	if [ $RETVAL -eq 0 ]; then
+	    log_success_msg "$NAME is running"
+	elif [ $RETVAL -eq 4 ]; then
+	    log_failure_msg "could not access PID file for $NAME"
+	else
+	    log_failure_msg "$NAME is not running"
+	fi
+	return $RETVAL
+    }
 fi
-
-do_start() {
-  start-stop-daemon --start \
+{{ if eq .Flavour "debian"}}
+start() {
+    log_daemon_msg "Starting ${DESC}"
+    start-stop-daemon --start \
     {{if .ChRoot}}--chroot {{.ChRoot|cmd}}{{end}} \
     {{if .WorkingDirectory}}--chdir {{.WorkingDirectory|cmd}}{{end}} \
-    {{if .UserName}} --chuid {{.UserName|cmd}}{{end}} \
+    {{if .UserName}}--chuid {{.UserName|cmd}}{{end}} \
     --pidfile "$PIDFILE" \
     --background \
     --make-pidfile \
-    --exec {{.Path}} -- {{range .Arguments}} {{.|cmd}}{{end}}
+    --exec "$CMD" -- "$DAEMON_ARGS"
+    log_end_msg  $?
 }
 
-do_stop() {
-  start-stop-daemon --stop \
-    {{if .UserName}} --chuid {{.UserName|cmd}}{{end}} \
-    --pidfile "$PIDFILE" \
-    --quiet
-}
-
-case "$1" in
-  start)
-    log_daemon_msg "Starting $DESC"
-    do_start
-    log_end_msg $?
-    ;;
-  stop)
-    log_daemon_msg "Stopping $DESC"
-    do_stop
-    log_end_msg $?
-    ;;
-  restart)
-    $0 stop
-    $0 start
-    ;;
-  status)
-    status_of_proc -p "$PIDFILE" "$DAEMON" "$DESC"
-    ;;
-  *)
-    echo "Usage: sudo service $0 {start|stop|restart|status}" >&2
-    exit 1
-    ;;
-esac
-
-exit 0
-`
-
-const sysvRedhatScript = `#!/bin/sh
-# For RedHat and cousins:
-# chkconfig: - 99 01
-# description: {{.Description}}
-# processname: {{.Path}}
- 
-# Source function library.
-. /etc/rc.d/init.d/functions
-
-name="{{.Name}}"
-desc="{{.Description}}"
-user="{{.UserName}}"
-cmd={{.Path}}
-args="{{range .Arguments}} {{.|cmd}}{{end}}"
-lockfile=/var/lock/subsys/$name
-pidfile=/var/run/$name.pid
-
-# Source networking configuration.
-[ -r /etc/sysconfig/$name ] && . /etc/sysconfig/$name
- 
-start() {
-    echo -n $"Starting $desc: "
-    daemon \
-        {{if .UserName}}--user=$user{{end}} \
-        {{if .WorkingDirectory}}--chdir={{.WorkingDirectory|cmd}}{{end}} \
-        "$cmd $args </dev/null >/dev/null 2>/dev/null & echo \$! > $pidfile"
-    retval=$?
-    [ $retval -eq 0 ] && touch $lockfile
-    echo
-    return $retval
-}
- 
 stop() {
-    echo -n $"Stopping $desc: "
-    killproc -p $pidfile $cmd -TERM
-    retval=$?
-    [ $retval -eq 0 ] && rm -f $lockfile
-    rm -f $pidfile
-    echo
-    return $retval
-}
- 
-restart() {
-    stop
-    start
-}
- 
-reload() {
-    echo -n $"Reloading $desc: "
-    killproc -p $pidfile $cmd -HUP
+    log_daemon_msg "Stopping ${DESC}"
+    start-stop-daemon --stop --pidfile "$PIDFILE" --quiet
     RETVAL=$?
-    echo
+    rm -f "$PIDFILE"
+    log_end_msg $RETVAL
+}{{else}}{{/* LSB */}}
+start() {
+    get_status &>/dev/null && return 0
+    echo -n $"Starting $DESC: ${NAME}"
+    {{if .WorkingDirectory}}cd {{.WorkingDirectory|cmd}}{{end}}
+    "$CMD" "$DAEMON_ARGS" </dev/null >"$STDOUTLOG" 2>"$STDERRLOG" &
+    echo $! > "$PIDFILE"
+    sleep 0.5 # wait briefly to see if service crashed
+    get_status &>/dev/null
+    RETVAL=$?
+    if [ $RETVAL -eq 0 ]; then
+	    log_success_msg
+	    touch "$LOCKFILE"
+    else
+	    log_failure_msg
+	    rm -f "$PIDFILE"
+    fi
+    return $RETVAL
 }
- 
-force_reload() {
-    restart
-}
- 
-rh_status() {
-    status -p $pidfile $cmd
-}
- 
-rh_status_q() {
-    rh_status >/dev/null 2>&1
-}
- 
+
+stop() {
+    get_status &>/dev/null || return 0
+    echo -n $"Stopping ${DESC}: ${NAME}"
+    killproc -p "$PIDFILE" "$CMD" -TERM
+    RETVAL=$?
+    if [ $RETVAL -eq 0 ]; then
+	    log_success_msg
+	    rm -f "$LOCKFILE"
+    else
+	    log_failure_msg
+    fi
+    rm -f "$PIDFILE"
+    return $RETVAL
+}{{end}}{{/* LSB */}}{{end}}{{/* Debian-like system */}}
+
 case "$1" in
-    start)
-        rh_status_q && exit 0
-        $1
-        ;;
-    stop)
-        rh_status_q || exit 0
-        $1
-        ;;
-    restart)
-        $1
-        ;;
-    reload)
-        rh_status_q || exit 7
-        $1
-        ;;
-    force-reload)
-        force_reload
-        ;;
+    start|stop)
+	$1
+	;;
+    restart|force-reload)
+	stop
+	start
+	;;
     status)
-        rh_status
-        ;;
-    condrestart|try-restart)
-        rh_status_q || exit 0
-        ;;
+	get_status
+	;;
     *)
-        echo $"Usage: $0 {start|stop|status|restart|condrestart|try-restart|reload|force-reload}"
-        exit 2
+	echo $"Usage: $0 {start|stop|status|restart|force-reload}" >&2
+	exit 2 # LSB: invalid or excess arguments
 esac
 `
