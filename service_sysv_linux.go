@@ -286,9 +286,6 @@ LOCKFILE="/var/lock/subsys/${NAME}"
 STDOUTLOG="/dev/null"
 STDERRLOG="/dev/null"
 
-# Startup options
-DAEMON_ARGS="{{range .Arguments}} {{.|cmd}}{{end}}"
-
 # Source configuration defaults to override above as appropriate.
 ! test -e /etc/default/${NAME}   || . /etc/default/${NAME}
 ! test -e /etc/sysconfig/${NAME} || . /etc/sysconfig/${NAME}
@@ -304,7 +301,7 @@ start() {
     get_status &>/dev/null && return 0
     echo -n $"Starting ${DESC}: "
     daemon --pidfile="$PIDFILE" {{if .UserName}}--user={{.UserName}}{{end}} \
-	   "$CMD $DAEMON_ARGS </dev/null >$STDOUTLOG 2>$STDERRLOG & echo \$! > $PIDFILE"
+	   "$CMD {{range .Arguments}} {{.|cmd}}{{end}} </dev/null >$STDOUTLOG 2>$STDERRLOG & echo \$! > $PIDFILE"
     sleep 0.5 # wait briefly to see if service failed to start
     get_status &>/dev/null && success || failure
     RETVAL=$?
@@ -350,7 +347,7 @@ start() {
     --pidfile "$PIDFILE" \
     --background \
     --make-pidfile \
-    --exec "$CMD" -- "$DAEMON_ARGS"
+    --exec "$CMD" -- {{range .Arguments}} {{.|cmd}}{{end}}
     log_end_msg  $?
 }
 
@@ -365,7 +362,7 @@ start() {
     get_status &>/dev/null && return 0
     echo -n $"Starting $DESC: ${NAME}"
     {{if .WorkingDirectory}}cd {{.WorkingDirectory|cmd}}{{end}}
-    "$CMD" "$DAEMON_ARGS" </dev/null >"$STDOUTLOG" 2>"$STDERRLOG" &
+    "$CMD" {{range .Arguments}} {{.|cmd}}{{end}} </dev/null >"$STDOUTLOG" 2>"$STDERRLOG" &
     echo $! > "$PIDFILE"
     sleep 0.5 # wait briefly to see if service crashed
     get_status &>/dev/null
