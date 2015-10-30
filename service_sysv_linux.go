@@ -12,7 +12,19 @@ import (
 	"os/exec"
 	"syscall"
 	"text/template"
+	"strings"
 	"time"
+)
+
+const (
+	// Default runlevels to start service in
+	defaultStartLevels   = "2345"
+	// Default runlevels to stop service in
+	defaultStopLevels    = "016"
+	// Default priority for starting service (RH-based systems)
+	defaultStartPriority = "50"
+	// Default priority for stopping service (RH-based systems)
+	defaultStopPriority  = "02"
 )
 
 type sysv struct {
@@ -56,19 +68,15 @@ func (s *sysv) configPath() (cp string, err error) {
  */
 func determineDistroFlavour() string {
 	if _, err := os.Stat("/etc/rc.d/init.d/functions"); err == nil {
-		/* Red Hat / CentOS type systems */
 		return "redhat"
 	} else if  _, err := os.Stat("/lib/lsb/init-functions"); os.IsNotExist(err) {
 		fmt.Fprintf(os.Stderr, "System is lacking LSB support (/lib/lsb/init-functions)")
 		os.Exit(1)
 	} else if _, err := exec.LookPath("start-stop-daemon"); err == nil {
-		/* debian/ubuntu based systems support this */
 		return "debian"
 	}
-	/* Linux Standard Base as lowest common denominator */
 	return "lsb"
 }
-
 
 func (s *sysv) Install() error {
 	confPath, err := s.configPath()
@@ -87,10 +95,22 @@ func (s *sysv) Install() error {
 		Path		string
 		// The SysV flavour of this system
 		Flavour		string
+		// The default start priority level (%02d)
+		DefaultStart	string
+		// The default stop priority (%02d)
+		DefaultStop	string
+		// SysV start runlevels (0-6)
+		StartLevels	[]string
+		// SysV stop runlevels (0-6)
+		StopLevels	[]string
 	}{
 		s.Config,
 		path,
 		determineDistroFlavour(),
+		defaultStartPriority,
+		defaultStopPriority,
+		strings.Split(defaultStartLevels, ""),
+		strings.Split(defaultStopLevels, ""),
 	}
 
 	if _, err = os.Stat(confPath); err == nil {
@@ -111,18 +131,8 @@ func (s *sysv) Install() error {
 	if err = os.Chmod(confPath, 0755); err != nil {
 		return err
 	}
-	for _, i := range [...]string{"2", "3", "4", "5"} {
-		if err = os.Symlink(confPath, "/etc/rc"+i+".d/S50"+s.Name); err != nil {
-			continue
-		}
-	}
-	for _, i := range [...]string{"0", "1", "6"} {
-		if err = os.Symlink(confPath, "/etc/rc"+i+".d/K02"+s.Name); err != nil {
-			continue
-		}
-	}
 
-	return nil
+	return s.manageSymlinks(confPath, true)
 }
 
 func (s *sysv) Uninstall() error {
@@ -130,10 +140,12 @@ func (s *sysv) Uninstall() error {
 	if err != nil {
 		return err
 	}
-	if err := os.Remove(cp); err != nil {
+
+	if err := s.manageSymlinks(cp, false); err != nil {
 		return err
 	}
-	return nil
+
+	return os.Remove(cp)
 }
 
 func (s *sysv) Logger(errs chan<- error) (Logger, error) {
@@ -178,27 +190,90 @@ func (s *sysv) Restart() error {
 	return s.Start()
 }
 
+// (Un)install symbolic runlevel links
+func (s *sysv) manageSymlinks(confPath string, install bool) error {
+	var cmd *exec.Cmd
+
+	if _, err := exec.LookPath("chkconfig"); err == nil {
+		if install {
+			cmd = exec.Command("chkconfig", "--add", s.Name)
+		} else {
+			cmd = exec.Command("chkconfig", "--del", s.Name)
+		}
+	} else if _, err := exec.LookPath("update-rc.d"); err == nil {
+		if install {
+			cmd = exec.Command("update-rc.d", s.Name, "defaults")
+		} else {
+			cmd = exec.Command("update-rc.d", "-f", s.Name, "remove")
+		}
+	}
+
+	if cmd != nil {
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("Failed to run %q: %s", strings.Join(cmd.Args, " "), err)
+		}
+	} else {
+		/* Manually install/remove symlinks */
+		var base = "/etc"
+
+		/* Debian/ubuntu use /etc/rc[0-6].d; RedHat uses /etc/rc.d/rc[0-6].d */
+		if _, err := os.Stat("/etc/rc.d/"); err == nil {
+			base = "/etc/rc.d"
+		} else if _, err := os.Stat(base + "/rc0.d"); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "FIXME: no suitable rc.d directory found in /etc")
+			os.Exit(1)
+		}
+
+		for _, i := range strings.Split(defaultStartLevels, "") {
+			path := fmt.Sprintf("%s/rc%s.d/S%s%s", base, i, defaultStartPriority, s.Name)
+			if install {
+				if err := os.Symlink(confPath, path); err != nil {
+					return fmt.Errorf("Failed to create startup link %s: %s", path, err)
+				}
+			} else {
+				if err := os.Remove(path); err != nil {
+					return fmt.Errorf("Failed to remove startup link %s: %s", path, err)
+				}
+			}
+		}
+		for _, i := range strings.Split(defaultStopLevels, "") {
+			path := fmt.Sprintf("%s/rc%s.d/K%s%s", base, i, defaultStopPriority, s.Name)
+			if install {
+				if err := os.Symlink(confPath, path); err != nil {
+					return fmt.Errorf("Failed to create shutdown link %s: %s", path, err)
+				}
+			} else {
+				if err := os.Remove(path); err != nil {
+					return fmt.Errorf("Failed to remove shutdown link %s: %s", path, err)
+				}
+			}
+		}
+	}
+	return nil
+}
+
 const sysvScript = `#!/bin/bash
-{{ if eq .Flavour "redhat"}}#
+{{if eq .Flavour "redhat"}}#
 # {{.DisplayName}}
 #
-# chkconfig:   2345 50 02
+# chkconfig:   {{join .StartLevels ""}} {{.DefaultStart}} {{.DefaultStop}}
 # description: {{.Description}}
 
 # Source function library.
 . /etc/rc.d/init.d/functions
 {{else}}{{/* System with support for LSB */}}### BEGIN INIT INFO
-# Provides:          {{.Path}}
+# Provides:          {{.Name}}
 # Required-Start:    $local_fs $remote_fs $network $syslog
 # Required-Stop:     $local_fs $remote_fs $network $syslog
-# Default-Start:     2 3 4 5
-# Default-Stop:      0 1 6
+# Default-Start:     {{join .StartLevels " "}}
+# Default-Stop:      {{join .StopLevels  " "}}
 # Short-Description: {{.DisplayName}}
 # Description:       {{.Description}}
 ### END INIT INFO
 
 # Source function library.
-. /lib/lsb/init-functions{{end}}
+. /lib/lsb/init-functions
+{{end}}
 CMD="{{.Path}}"
 NAME="{{.Name}}"
 DESC="{{.Description}}"

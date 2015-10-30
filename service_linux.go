@@ -31,14 +31,14 @@ func (sc linuxSystemService) New(i Interface, c *Config) (Service, error) {
 
 func init() {
 	ChooseSystem(linuxSystemService{
-		name:   "linux-systemd",
-		detect: isSystemd,
-		interactive: func() bool {
-			is, _ := isInteractive()
-			return is
+			name:   "linux-systemd",
+			detect: isSystemd,
+			interactive: func() bool {
+				is, _ := isInteractive()
+				return is
+			},
+			new: newSystemdService,
 		},
-		new: newSystemdService,
-	},
 		linuxSystemService{
 			name:   "linux-upstart",
 			detect: isUpstart,
@@ -68,5 +68,15 @@ func isInteractive() (bool, error) {
 var tf = map[string]interface{}{
 	"cmd": func(s string) string {
 		return `"` + strings.Replace(s, `"`, `\"`, -1) + `"`
+	},
+	"join": func(items []string, sep string) string {
+		switch len(items) {
+		case 0:
+			return ""
+		case 1:
+			return items[0]
+		default:
+			return strings.Join(items, sep)
+		}
 	},
 }
