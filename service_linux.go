@@ -7,6 +7,7 @@ package service
 import (
 	"os"
 	"strings"
+	"regexp"
 )
 
 type linuxSystemService struct {
@@ -67,7 +68,11 @@ func isInteractive() (bool, error) {
 
 var tf = map[string]interface{}{
 	"cmd": func(s string) string {
-		return `"` + strings.Replace(s, `"`, `\"`, -1) + `"`
+		s = strings.TrimSpace(s)
+		if needsQuotes, _ := regexp.MatchString(`\s+`, s); needsQuotes {
+			return `"` + strings.Replace(s, `"`, `\"`, -1) + `"`
+		}
+		return s
 	},
 	"join": func(items []string, sep string) string {
 		switch len(items) {
