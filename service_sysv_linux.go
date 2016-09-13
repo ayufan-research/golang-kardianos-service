@@ -283,7 +283,7 @@ esac
 exit 0
 `
 
-const sysvDebianScript = `#! /bin/bash
+const sysvDebianScript = `#!/bin/sh
 
 ### BEGIN INIT INFO
 # Provides:          {{.Path}}
@@ -295,6 +295,7 @@ const sysvDebianScript = `#! /bin/bash
 # Description:       {{.Description}}
 ### END INIT INFO
 
+DAEMON="{{.Path}}"
 DESC="{{.Description}}"
 USER="{{.UserName}}"
 NAME="{{.Name}}"
@@ -306,12 +307,6 @@ PIDFILE="/var/run/$NAME.pid"
 # Define LSB log_* functions.
 . /lib/lsb/init-functions
 
-## Check to see if we are running as root first.
-if [ "$(id -u)" != "0" ]; then
-    echo "This script must be run as root"
-    exit 1
-fi
-
 do_start() {
   start-stop-daemon --start \
     {{if .ChRoot}}--chroot {{.ChRoot|cmd}}{{end}} \
@@ -320,7 +315,7 @@ do_start() {
     --pidfile "$PIDFILE" \
     --background \
     --make-pidfile \
-    --exec {{.Path}} -- {{range .Arguments}} {{.|cmd}}{{end}}
+    --exec "$DAEMON" -- {{range .Arguments}} {{.|cmd}}{{end}}
 }
 
 do_stop() {
