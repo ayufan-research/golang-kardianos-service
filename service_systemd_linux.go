@@ -171,6 +171,7 @@ ExecStart={{.Path}}{{range .Arguments}} {{.|cmd}}{{end}}
 {{if .PIDFile}}PIDFile={{.PIDFile|cmd}}{{end}}
 Restart=always
 RestartSec=120
+EnvironmentFile=-/etc/sysconfig/{{.Name}}
 
 [Install]
 WantedBy=multi-user.target
