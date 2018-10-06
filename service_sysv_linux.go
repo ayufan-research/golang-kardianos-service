@@ -346,7 +346,7 @@ case "$1" in
     $0 start
     ;;
   status)
-    status_of_proc -p "$PIDFILE" "$DAEMON" "$DESC"
+    status_of_proc -p "$PIDFILE" "$NAME" "$DESC"
     ;;
   *)
     echo "Usage: sudo service $0 {start|stop|restart|status}" >&2
